@@ -14,6 +14,19 @@ class BillDelayDetailsController extends AccountBaseController
 {
     public function index(Request $request)
     {
+        // Non-admin cannot filter by a project they aren't a member of.
+        // Drop that filter and redirect to the clean URL so the user sees
+        // bills they actually have access to.
+        $projectId = $request->input('project_id');
+        if ($projectId !== null && $projectId !== ''
+            && ! user()->hasRole('admin')
+            && ! in_array('vendor', user_roles())
+            && ! $this->userBelongsToProject((int) $projectId)) {
+            return redirect()
+                ->route('bills.delay-details', $request->except('project_id'))
+                ->with('warning', 'You are not assigned to that project. Showing bills for your assigned projects instead.');
+        }
+
         $bills = $this->filteredBillsQuery($request)
             ->paginate(20)
             ->withQueryString();
@@ -24,31 +37,49 @@ class BillDelayDetailsController extends AccountBaseController
             ->keyBy('bill_id');
 
         $employeeId = $request->input('employee_id');
+
         $bills->getCollection()->transform(function ($bill) use ($approvalByRows, $employeeId) {
             $approvalBy = $approvalByRows->get($bill->bill_id);
             $approvals = $this->approverTimeline($bill->bill_id, $bill->project_id, $approvalBy);
+
+            // Keep the raw SQL aggregate for reference / debugging, then
+            // overwrite with the authoritative value computed from the
+            // approval timeline.
+            $bill->raw_delay_sum = (int) ($bill->total_delay_days ?? 0);
             $bill->total_delay_days = $this->billDelayTotal($approvals, $employeeId);
 
             return $bill;
         });
+
+        // Sort the current page by the computed delay so the worst delays
+        // surface first. (SQL ORDER BY below handles cross-page ordering
+        // when no project/employee filter is active.)
         $bills->setCollection(
             $bills->getCollection()->sortByDesc('total_delay_days')->values()
         );
 
+        $this->flashEmptyStateNotice($bills);
+
+        $employees = DB::table('users')
+            ->where('company_id', company()->id)
+            ->where('status', 'active')
+            ->whereNotExists(function ($excludedRole) {
+                $excludedRole->selectRaw('1')
+                    ->from('role_user')
+                    ->join('roles', 'roles.id', '=', 'role_user.role_id')
+                    ->whereColumn('role_user.user_id', 'users.id')
+                    ->whereIn('roles.name', ['admin', 'client', 'vendor']);
+            })
+            ->select('id', 'name')
+            ->orderBy('name')
+            ->get();
+
+        $projects = $this->visibleProjectsQuery()
+            ->select('id', 'project_name')
+            ->orderBy('project_name')
+            ->get();
+
         $filterQuery = $this->delayedBillsQuery();
-        $employees = (clone $filterQuery)
-            ->join('users as filter_users', 'filter_users.id', '=', 'pbd.user_id')
-            ->select('filter_users.id', 'filter_users.name')
-            ->distinct()
-            ->orderBy('filter_users.name')
-            ->get();
-
-        $projects = (clone $filterQuery)
-            ->select('po.project_id as id', 'p.project_name')
-            ->distinct()
-            ->orderBy('p.project_name')
-            ->get();
-
         $subprojects = (clone $filterQuery)
             ->select('po.subproject_id as id', 't.heading', 'p.project_name')
             ->distinct()
@@ -72,7 +103,10 @@ class BillDelayDetailsController extends AccountBaseController
             ->whereIn('bill_id', $bills->pluck('bill_id'))
             ->get()
             ->keyBy('bill_id');
-        $rows = $bills->map(function ($bill) use ($approvalByRows, $request) {
+
+        $employeeId = $request->input('employee_id');
+
+        $rows = $bills->map(function ($bill) use ($approvalByRows, $employeeId) {
             $approvals = $this->approverTimeline(
                 $bill->bill_id,
                 $bill->project_id,
@@ -85,7 +119,7 @@ class BillDelayDetailsController extends AccountBaseController
                 $bill->subproject_name,
                 $bill->bill_date,
                 ucfirst(str_replace('_', ' ', $bill->status)),
-                $this->billDelayTotal($approvals, $request->input('employee_id')),
+                $this->billDelayTotal($approvals, $employeeId),
             ];
         })->sortByDesc(fn ($row) => $row[5])->values()->all();
 
@@ -100,7 +134,9 @@ class BillDelayDetailsController extends AccountBaseController
 
     public function show(int $billId)
     {
-        $bill = $this->delayedBillsQuery()
+        $this->assertBillAccessible($billId);
+
+        $bill = $this->delayedBillsQuery(true)
             ->where('pb.id', $billId)
             ->select(
                 'pb.id',
@@ -112,7 +148,7 @@ class BillDelayDetailsController extends AccountBaseController
                 'po.subproject_id',
                 't.heading as subproject_name'
             )
-            ->selectRaw('SUM(pbd.delay_days) as total_delay_days')
+            ->selectRaw('COALESCE(SUM(pbd.delay_days), 0) as total_delay_days')
             ->groupBy(
                 'pb.id',
                 'pb.purchase_bill_number',
@@ -144,7 +180,9 @@ class BillDelayDetailsController extends AccountBaseController
 
     public function exportShow(int $billId)
     {
-        $bill = $this->delayedBillsQuery()
+        $this->assertBillAccessible($billId);
+
+        $bill = $this->delayedBillsQuery(true)
             ->where('pb.id', $billId)
             ->select('pb.id', 'pb.purchase_bill_number', 'pb.status', 'po.project_id')
             ->first();
@@ -182,12 +220,145 @@ class BillDelayDetailsController extends AccountBaseController
         );
     }
 
+    /**
+     * A non-admin can only access bills whose PO's project is in
+     * their project_members. Admin bypasses. Vendor is scoped separately.
+     */
+    private function assertBillAccessible(int $billId): void
+    {
+        $exists = $this->delayedBillsQuery(true)
+            ->where('pb.id', $billId)
+            ->exists();
+
+        abort_if(! $exists, 404);
+    }
+
+    /**
+     * Check if the current user belongs to the given project.
+     * Admin always returns true.
+     */
+    private function userBelongsToProject(int $projectId): bool
+    {
+        if (user()->hasRole('admin')) {
+            return true;
+        }
+
+        if (in_array('vendor', user_roles())) {
+            return false;
+        }
+
+        return DB::table('project_members')
+            ->where('user_id', user()->id)
+            ->where('project_id', $projectId)
+            ->exists();
+    }
+
+    /**
+     * Projects the current user is allowed to see in the filter dropdown.
+     * Admin → all projects. Vendor / others → their assigned projects.
+     */
+    private function visibleProjectsQuery()
+    {
+        $query = DB::table('projects')
+            ->where('company_id', company()->id)
+            ->whereNull('deleted_at');
+
+        if (user()->hasRole('admin')) {
+            return $query;
+        }
+
+        return $query->whereExists(function ($pm) {
+            $pm->selectRaw('1')
+                ->from('project_members as pm')
+                ->whereColumn('pm.project_id', 'projects.id')
+                ->where('pm.user_id', user()->id);
+        });
+    }
+
+    /**
+     * Explain why a non-admin sees zero bills, instead of silently
+     * rendering an empty table.
+     */
+    private function flashEmptyStateNotice($bills): void
+    {
+        if ($bills->total() > 0) {
+            return;
+        }
+
+        if (user()->hasRole('admin')) {
+            return;
+        }
+
+        $userId = (int) user()->id;
+
+        if (in_array('vendor', user_roles())) {
+            $hasVendorRow = DB::table('purchase_vendors')
+                ->where('user_id', $userId)
+                ->exists();
+
+            if (! $hasVendorRow) {
+                session()->flash('warning',
+                    'Your account has the vendor role but no vendor profile is linked. Ask an admin to create or link your vendor record.'
+                );
+
+                return;
+            }
+        }
+
+        $memberOfAny = DB::table('project_members')
+            ->where('user_id', $userId)
+            ->exists();
+
+        if (! $memberOfAny) {
+            session()->flash('warning',
+                'You are not assigned to any project yet. Ask an admin to add you as a project member.'
+            );
+
+            return;
+        }
+
+        $activeFilter = request()->only(['project_id', 'subproject_id', 'employee_id', 'bill_number']);
+        $activeFilter = array_filter($activeFilter, fn ($v) => $v !== null && $v !== '');
+
+        if ($activeFilter) {
+            session()->flash('warning',
+                'No bills match the current filters. Try clearing the project, subproject, employee, or bill-number filter.'
+            );
+        }
+    }
+
     private function filteredBillsQuery(Request $request): Builder
     {
-        $query = $this->delayedBillsQuery();
+        // Project filter → show ALL bills in the project (Paid / Partially
+        // Paid / Pending, with or without delay rows) so the delay column
+        // is visible for every bill. Employee filter also needs zero-delay
+        // rows so we can show that employee's full approval timeline.
+        // No filter → only genuinely delayed bills.
+        $query = $this->delayedBillsQuery(
+            $request->filled('project_id') || $request->filled('employee_id')
+        );
 
         if ($request->filled('employee_id')) {
-            $query->where('pbd.user_id', $request->input('employee_id'));
+            $employeeId = (int) $request->input('employee_id');
+
+            $validEmployee = DB::table('users')
+                ->where('id', $employeeId)
+                ->where('company_id', company()->id)
+                ->exists();
+
+            if (! $validEmployee) {
+                $query->whereRaw('1 = 0');
+            } else {
+                // Restrict to bills this employee actually has a delay row
+                // on. Their timeline may still contain 0-delay stages, but
+                // the bill must involve this employee.
+                $query->whereExists(function ($sub) use ($employeeId) {
+                    $sub->selectRaw('1')
+                        ->from('purchase_bills_delay as d')
+                        ->whereColumn('d.bill_id', 'pb.id')
+                        ->where('d.user_id', $employeeId);
+                });
+            }
         }
 
         if ($request->filled('bill_number')) {
@@ -217,7 +388,7 @@ class BillDelayDetailsController extends AccountBaseController
                 'p.project_name',
                 't.heading as subproject_name'
             )
-            ->selectRaw('SUM(pbd.delay_days) as total_delay_days')
+            ->selectRaw('COALESCE(SUM(pbd.delay_days), 0) as total_delay_days')
             ->groupBy(
                 'pb.id',
                 'pb.purchase_bill_number',
@@ -227,7 +398,10 @@ class BillDelayDetailsController extends AccountBaseController
                 'po.subproject_id',
                 'p.project_name',
                 't.heading'
-            );
+            )
+            // Provisional ordering; the authoritative sort by computed
+            // delay happens after the transform in index().
+            ->orderByDesc('pb.bill_date');
     }
 
     private function billDelayTotal($approvals, $employeeId = null): int
@@ -300,10 +474,12 @@ class BillDelayDetailsController extends AccountBaseController
             ]);
 
         $approvals = $approvals->concat($historicalDelays);
+
         $activePriority = $approvalBy && (int) $approvalBy->status !== 2
             ? (int) $approvalBy->approval_status
             : null;
-        $handoffAt = $approvalBy->created_at ?? null;
+        $handoffAt = $approvalBy?->created_at;
+        $currentUpdatedAt = $approvalBy?->updated_at;
 
         foreach ($approvals as $approval) {
             $completion = $eventsByApprover->get($approval->user_id, collect())->last();
@@ -328,14 +504,15 @@ class BillDelayDetailsController extends AccountBaseController
             $approval->was_advanced = $activePriority !== null
                 && (int) $approval->priority_id < $activePriority
                 && ! $completion;
+
             if ($completion) {
                 $approval->received_at = $handoffAt;
             } elseif ($isCurrent) {
                 $approval->received_at = $handoffAt
-                    && $approvalBy->updated_at
-                    && Carbon::parse($handoffAt)->greaterThan(Carbon::parse($approvalBy->updated_at))
+                    && $currentUpdatedAt
+                    && Carbon::parse($handoffAt)->greaterThan(Carbon::parse($currentUpdatedAt))
                         ? $handoffAt
-                        : ($approvalBy->updated_at ?: $handoffAt);
+                        : ($currentUpdatedAt ?: $handoffAt);
             } elseif ($activePriority !== null && (int) $approval->priority_id < $activePriority) {
                 $approval->received_at = $handoffAt;
             } else {
@@ -349,6 +526,7 @@ class BillDelayDetailsController extends AccountBaseController
             $approval->calculated_delay_days = $hasConfiguredAllowance
                 ? 0
                 : (int) ($approval->delay_days ?? 0);
+
             if ($approval->received_at && $approval->approval_time !== null) {
                 $dueAt = Carbon::parse($approval->received_at);
                 if (in_array($unit, ['hour', 'hours'], true)) {
@@ -395,16 +573,33 @@ class BillDelayDetailsController extends AccountBaseController
 
         return $approvals;
     }
-    
-    private function delayedBillsQuery(): Builder
+
+    private function delayedBillsQuery(bool $includeZeroDelayBills = false): Builder
     {
-        $query = DB::table('purchase_bills_delay as pbd')
-            ->join('purchase_bills as pb', 'pb.id', '=', 'pbd.bill_id')
+        // Base = purchase_bills, LEFT JOIN delay rows so bills with no
+        // delay record still appear when the caller wants "all bills in
+        // project". Using LEFT JOIN (not inner join) guarantees each bill
+        // is one row for the GROUP BY and never duplicated by multi-stage
+        // delay rows.
+        $query = DB::table('purchase_bills as pb')
             ->join('purchase_orders as po', 'po.id', '=', 'pb.purchase_order_id')
             ->join('projects as p', 'p.id', '=', 'po.project_id')
             ->leftJoin('tasks as t', 't.id', '=', 'po.subproject_id')
-            ->where('pbd.delay_days', '>', 0)
+            ->leftJoin('purchase_bills_delay as pbd', 'pbd.bill_id', '=', 'pb.id')
             ->where('pb.company_id', company()->id);
+
+        if (! $includeZeroDelayBills) {
+            // No project/employee filter → only bills that were actually
+            // delayed (have at least one delay row with delay_days > 0).
+            $query->whereExists(function ($sub) {
+                $sub->selectRaw('1')
+                    ->from('purchase_bills_delay as d')
+                    ->whereColumn('d.bill_id', 'pb.id')
+                    ->where('d.delay_days', '>', 0);
+            });
+        }
+        // includeZeroDelayBills = true → no delay filter at all, so every
+        // bill in scope (Paid / Partially Paid / Pending) is returned.
 
         if (user()->hasRole('admin')) {
             return $query;

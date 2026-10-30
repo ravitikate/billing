@@ -30,13 +30,39 @@
 
             .delay-pagination .pagination {
                 margin: 0;
+                flex-wrap: wrap;
             }
 
             .delay-pagination .page-link {
                 border-radius: 6px;
                 margin: 0 2px;
             }
+
+            @media (max-width: 575.98px) {
+                .delay-pagination {
+                    justify-content: center;
+                    text-align: center;
+                }
+
+                .delay-pagination nav {
+                    width: 100%;
+                }
+
+                .delay-pagination .pagination {
+                    justify-content: center;
+                }
+            }
         </style>
+
+        @if (session('warning'))
+            <div class="alert alert-warning alert-dismissible fade show" role="alert">
+                {{ session('warning') }}
+                <button type="button" class="close" data-dismiss="alert" aria-label="Close">
+                    <span aria-hidden="true">&times;</span>
+                </button>
+            </div>
+        @endif
+
         <div class="card border-0 b-shadow-4 p-3 mb-3">
             <form method="GET" action="{{ route('bills.delay-details') }}">
                 <div class="row align-items-end">
@@ -133,7 +159,7 @@
                 <small class="text-muted">
                     Showing {{ $bills->firstItem() ?? 0 }}–{{ $bills->lastItem() ?? 0 }} of {{ $bills->total() }} bills
                 </small>
-                {{ $bills->links() }}
+                {{ $bills->links('pagination::bootstrap-4') }}
             </div>
         </div>
     </div>
