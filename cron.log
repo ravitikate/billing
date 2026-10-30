@@ -1,0 +1,29 @@
+
+  2025-02-05 13:30:14 Running ['artisan' auto-stop-timer] ......... 951ms DONE
+  ⇂ '/opt/cpanel/ea-php82/root/usr/bin/php' 'artisan' auto-stop-timer > '/dev/null' 2>&1  
+  2025-02-05 13:30:15 Running ['artisan' send-event-reminder] ..... 789ms DONE
+  ⇂ '/opt/cpanel/ea-php82/root/usr/bin/php' 'artisan' send-event-reminder > '/dev/null' 2>&1  
+  2025-02-05 13:30:16 Running ['artisan' hide-cron-message] ....... 765ms DONE
+  ⇂ '/opt/cpanel/ea-php82/root/usr/bin/php' 'artisan' hide-cron-message > '/dev/null' 2>&1  
+  2025-02-05 13:30:16 Running ['artisan' send-attendance-reminder]  755ms DONE
+  ⇂ '/opt/cpanel/ea-php82/root/usr/bin/php' 'artisan' send-attendance-reminder > '/dev/null' 2>&1  
+  2025-02-05 13:30:17 Running ['artisan' sync-user-permissions] ... 710ms DONE
+  ⇂ '/opt/cpanel/ea-php82/root/usr/bin/php' 'artisan' sync-user-permissions > '/dev/null' 2>&1  
+  2025-02-05 13:30:18 Running ['artisan' send-auto-followup-reminder]  797ms DONE
+  ⇂ '/opt/cpanel/ea-php82/root/usr/bin/php' 'artisan' send-auto-followup-reminder > '/dev/null' 2>&1  
+  2025-02-05 13:30:19 Running ['artisan' send-time-tracker] ..... 1,227ms DONE
+  ⇂ '/opt/cpanel/ea-php82/root/usr/bin/php' 'artisan' send-time-tracker > '/dev/null' 2>&1  
+  2025-02-05 13:30:20 Running ['artisan' clear-null-session] .... 1,032ms DONE
+  ⇂ '/opt/cpanel/ea-php82/root/usr/bin/php' 'artisan' clear-null-session > '/dev/null' 2>&1  
+  2025-02-05 13:30:21 Running ['artisan' create-database-backup] .. 863ms DONE
+  ⇂ '/opt/cpanel/ea-php82/root/usr/bin/php' 'artisan' create-database-backup > '/dev/null' 2>&1  
+  2025-02-05 13:30:22 Running ['artisan' delete-database-backup] .. 746ms DONE
+  ⇂ '/opt/cpanel/ea-php82/root/usr/bin/php' 'artisan' delete-database-backup > '/dev/null' 2>&1  
+  2025-02-05 13:30:23 Running ['artisan' add-missing-permissions]  1,155ms DONE
+  ⇂ '/opt/cpanel/ea-php82/root/usr/bin/php' 'artisan' add-missing-permissions > '/dev/null' 2>&1  
+  2025-02-05 13:30:24 Running ['artisan' queue:work database --tries=3 --stop-when-empty]  4,027ms DONE
+  ⇂ '/opt/cpanel/ea-php82/root/usr/bin/php' 'artisan' queue:work database --tries=3 --stop-when-empty > '/dev/null' 2>&1  
+
+Content-type: text/html; charset=UTF-8
+
+/usr/local/cpanel/bin/jailshell: /php: No such file or directory
